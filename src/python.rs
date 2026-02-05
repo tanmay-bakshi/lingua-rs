@@ -40,7 +40,7 @@ use crate::writer::{
 
 const ENUM_MEMBER_NOT_FOUND_MESSAGE: &str = "Matching enum member not found";
 
-#[pymodule]
+#[pymodule(gil_used = false)]
 fn lingua(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ConfidenceValue>()?;
     m.add_class::<DetectionResult>()?;

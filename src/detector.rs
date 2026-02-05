@@ -1066,9 +1066,7 @@ impl LanguageDetector {
         }
         self.ngram_language_models
             .get(&language)
-            .unwrap()
-            .get(ngram.value)
-            .map(f64::from_bits)
+            .and_then(|entry| entry.get(ngram.value).map(f64::from_bits))
     }
 
     fn count_unigrams(
