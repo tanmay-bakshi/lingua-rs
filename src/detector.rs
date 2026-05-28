@@ -29,13 +29,13 @@ use strum::IntoEnumIterator;
 
 use crate::alphabet::Alphabet;
 use crate::constant::{
-    CHARS_TO_LANGUAGES_MAPPING, JAPANESE_CHARACTER_SET, TOKENS_WITH_OPTIONAL_WHITESPACE,
-    TOKENS_WITHOUT_WHITESPACE,
+    CHARS_TO_LANGUAGES_MAPPING, JAPANESE_CHARACTER_SET, TOKENS_WITHOUT_WHITESPACE,
+    TOKENS_WITH_OPTIONAL_WHITESPACE,
 };
 use crate::language::Language;
 use crate::model::{
-    NgramCountModelType, create_lower_order_ngrams, create_ngrams, load_ngram_count_model,
-    load_ngram_probability_model,
+    create_lower_order_ngrams, create_ngrams, load_ngram_count_model, load_ngram_probability_model,
+    NgramCountModelType,
 };
 use crate::ngram::NgramRef;
 use crate::result::DetectionResult;
@@ -51,6 +51,8 @@ static UNIQUE_NGRAM_MODELS: LazyLock<CountModelMap> = LazyLock::new(DashMap::new
 static MOST_COMMON_NGRAM_MODELS: LazyLock<CountModelMap> = LazyLock::new(DashMap::new);
 static LANGUAGES_WITH_SINGLE_UNIQUE_SCRIPT: LazyLock<HashSet<Language>> =
     LazyLock::new(Language::all_with_single_unique_script);
+const SHORT_SINGLE_WORD_CONFIDENCE_LIMIT: f64 = 0.87;
+const MINIMUM_EXACT_HIGH_ORDER_NGRAM_COVERAGE: f64 = 2.0 / 3.0;
 
 /// This struct detects the language of text.
 ///
@@ -692,6 +694,7 @@ impl LanguageDetector {
         }
 
         compute_confidence_values(&mut values, all_probabilities, summed_up_probabilities);
+        self.calibrate_short_single_word_confidence(&mut values, &words, languages);
 
         values
     }
@@ -1089,6 +1092,52 @@ impl LanguageDetector {
         }
         unigram_counter
     }
+
+    fn calibrate_short_single_word_confidence(
+        &self,
+        values: &mut Vec<(Language, f64)>,
+        words: &[String],
+        languages: &HashSet<Language>,
+    ) {
+        if words.len() != 1 || languages.len() < 2 || values.len() < 2 {
+            return;
+        }
+
+        let (language, confidence) = values[0];
+        if confidence <= SHORT_SINGLE_WORD_CONFIDENCE_LIMIT {
+            return;
+        }
+
+        let exact_coverage = self.compute_exact_high_order_ngram_coverage(language, words);
+        if exact_coverage > MINIMUM_EXACT_HIGH_ORDER_NGRAM_COVERAGE {
+            return;
+        }
+
+        cap_confidence_value(values, language, SHORT_SINGLE_WORD_CONFIDENCE_LIMIT);
+        values.sort_by(confidence_values_comparator);
+    }
+
+    fn compute_exact_high_order_ngram_coverage(&self, language: Language, words: &[String]) -> f64 {
+        let mut exact_count = 0_usize;
+        let mut total_count = 0_usize;
+
+        for ngram_length in 4..6_usize {
+            let ngrams = create_ngrams(words, ngram_length);
+            total_count += ngrams.len();
+
+            for ngram in ngrams {
+                if self.look_up_ngram_probability(language, &ngram).is_some() {
+                    exact_count += 1;
+                }
+            }
+        }
+
+        if total_count == 0 {
+            return 1.0;
+        }
+
+        exact_count as f64 / total_count as f64
+    }
 }
 
 pub(crate) fn split_text_into_words(text: &str) -> Vec<String> {
@@ -1246,6 +1295,46 @@ fn compute_confidence_values(
     }
 
     values.sort_by(confidence_values_comparator);
+}
+
+fn cap_confidence_value(values: &mut [(Language, f64)], language: Language, limit: f64) {
+    let capped_value = values
+        .iter()
+        .find(|(current_language, _)| current_language == &language)
+        .map(|(_, value)| *value);
+
+    let Some(current_value) = capped_value else {
+        return;
+    };
+
+    if current_value <= limit {
+        return;
+    }
+
+    let remainder_delta = current_value - limit;
+    let remainder_sum = values
+        .iter()
+        .filter(|(current_language, _)| current_language != &language)
+        .map(|(_, value)| *value)
+        .sum::<f64>();
+    let remainder_count = values
+        .iter()
+        .filter(|(current_language, _)| current_language != &language)
+        .count();
+
+    for (current_language, value) in values {
+        if current_language == &language {
+            *value = limit;
+            continue;
+        }
+
+        if remainder_sum > 0.0 {
+            *value += remainder_delta * (*value / remainder_sum);
+            continue;
+        }
+
+        *value += remainder_delta / remainder_count as f64;
+    }
 }
 
 fn update_confidence_values(
@@ -1714,6 +1803,26 @@ mod tests {
     }
 
     #[rstest]
+    fn test_compute_language_confidence_values_calibrates_single_word_with_weak_high_order_evidence(
+    ) {
+        let detector = LanguageDetectorBuilder::from_languages(&[English, Spanish]).build();
+        let confidence_values = detector.compute_language_confidence_values("tirzepatide");
+
+        assert_eq!(confidence_values[0].0, Spanish);
+        assert!(confidence_values[0].1 <= SHORT_SINGLE_WORD_CONFIDENCE_LIMIT);
+    }
+
+    #[rstest]
+    fn test_compute_language_confidence_values_preserves_single_word_with_strong_high_order_evidence(
+    ) {
+        let detector = LanguageDetectorBuilder::from_languages(&[English, Spanish]).build();
+        let confidence_values = detector.compute_language_confidence_values("respuestas");
+
+        assert_eq!(confidence_values[0].0, Spanish);
+        assert!(confidence_values[0].1 > SHORT_SINGLE_WORD_CONFIDENCE_LIMIT);
+    }
+
+    #[rstest]
     fn test_compute_language_confidence_values_for_very_large_input_text() {
         let detector = LanguageDetector::from(hashset!(English, German), 0.0, true, false);
         let confidence_values = detector.compute_language_confidence_values(VERY_LARGE_INPUT_TEXT);
@@ -1764,11 +1873,9 @@ mod tests {
     fn test_detect_multiple_languages_for_empty_string(
         detector_for_all_languages: LanguageDetector,
     ) {
-        assert!(
-            detector_for_all_languages
-                .detect_multiple_languages_of("")
-                .is_empty()
-        );
+        assert!(detector_for_all_languages
+            .detect_multiple_languages_of("")
+            .is_empty());
     }
 
     #[rstest(
