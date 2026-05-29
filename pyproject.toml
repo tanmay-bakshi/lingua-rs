@@ -15,7 +15,7 @@
 
 [project]
 name = "lingua-language-detector"
-version = "2.2.0"
+version = "2.2.0+r741.3"
 authors = [{ name = "Peter M. Stahl", email = "pemistahl@gmail.com" }]
 description = "An accurate natural language detection library, suitable for short text and mixed-language text"
 readme = "README_PYPI.md"
@@ -113,4 +113,3 @@ features = ["pyo3/extension-module", "pyo3/generate-import-lib", "python"]
 [build-system]
 requires = ["maturin>=1.1,<2.0"]
 build-backend = "maturin"
-
