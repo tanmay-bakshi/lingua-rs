@@ -17,6 +17,7 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
@@ -29,13 +30,13 @@ use strum::IntoEnumIterator;
 
 use crate::alphabet::Alphabet;
 use crate::constant::{
-    CHARS_TO_LANGUAGES_MAPPING, JAPANESE_CHARACTER_SET, TOKENS_WITHOUT_WHITESPACE,
-    TOKENS_WITH_OPTIONAL_WHITESPACE,
+    CHARS_TO_LANGUAGES_MAPPING, JAPANESE_CHARACTER_SET, TOKENS_WITH_OPTIONAL_WHITESPACE,
+    TOKENS_WITHOUT_WHITESPACE,
 };
 use crate::language::Language;
 use crate::model::{
-    create_lower_order_ngrams, create_ngrams, load_ngram_count_model, load_ngram_probability_model,
-    NgramCountModelType,
+    NgramCountModelType, create_lower_order_ngrams, create_ngrams, load_ngram_count_model,
+    load_ngram_probability_model,
 };
 use crate::ngram::NgramRef;
 use crate::result::DetectionResult;
@@ -51,6 +52,7 @@ static UNIQUE_NGRAM_MODELS: LazyLock<CountModelMap> = LazyLock::new(DashMap::new
 static MOST_COMMON_NGRAM_MODELS: LazyLock<CountModelMap> = LazyLock::new(DashMap::new);
 static LANGUAGES_WITH_SINGLE_UNIQUE_SCRIPT: LazyLock<HashSet<Language>> =
     LazyLock::new(Language::all_with_single_unique_script);
+const R741_REVERT_ENV_VAR: &str = "LINGUA_R7.4.1_REVERT";
 const SHORT_SINGLE_WORD_CONFIDENCE_LIMIT: f64 = 0.87;
 const MINIMUM_EXACT_HIGH_ORDER_NGRAM_COVERAGE: f64 = 2.0 / 3.0;
 
@@ -694,7 +696,9 @@ impl LanguageDetector {
         }
 
         compute_confidence_values(&mut values, all_probabilities, summed_up_probabilities);
-        self.calibrate_short_single_word_confidence(&mut values, &words, languages);
+        if env::var_os(R741_REVERT_ENV_VAR).is_none() {
+            self.calibrate_short_single_word_confidence(&mut values, &words, languages);
+        }
 
         values
     }
@@ -1803,8 +1807,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_compute_language_confidence_values_calibrates_single_word_with_weak_high_order_evidence(
-    ) {
+    fn test_confidence_values_calibrate_weak_single_word_evidence() {
         let detector = LanguageDetectorBuilder::from_languages(&[English, Spanish]).build();
         let confidence_values = detector.compute_language_confidence_values("tirzepatide");
 
@@ -1813,8 +1816,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_compute_language_confidence_values_preserves_single_word_with_strong_high_order_evidence(
-    ) {
+    fn test_confidence_values_preserve_strong_single_word_evidence() {
         let detector = LanguageDetectorBuilder::from_languages(&[English, Spanish]).build();
         let confidence_values = detector.compute_language_confidence_values("respuestas");
 
@@ -1873,9 +1875,11 @@ mod tests {
     fn test_detect_multiple_languages_for_empty_string(
         detector_for_all_languages: LanguageDetector,
     ) {
-        assert!(detector_for_all_languages
-            .detect_multiple_languages_of("")
-            .is_empty());
+        assert!(
+            detector_for_all_languages
+                .detect_multiple_languages_of("")
+                .is_empty()
+        );
     }
 
     #[rstest(
